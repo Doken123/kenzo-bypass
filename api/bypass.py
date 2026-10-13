@@ -1,46 +1,54 @@
-from flask import Flask, request, jsonify
-import requests, re
-from bs4 import BeautifulSoup
-
-app = Flask(__name__)
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
-}
-
 def bypass_safelink(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True)
-        soup = BeautifulSoup(r.text, "html.parser")
+        html = r.text
+        soup = BeautifulSoup(html, "html.parser")
 
-        # Cari meta refresh
+        # 1. Cek meta refresh
         meta = soup.find("meta", attrs={"http-equiv": "refresh"})
         if meta:
-            m = re.search(r'url=(.+)', meta.get("content", ""))
+            m = re.search(r'url=(.+)', meta.get("content", ""), re.I)
             if m:
-                return m.group(1).strip()
+                return m.group(1).strip().strip('"\'')
 
-        # Cari script redirect
+        # 2. Cek semua script — cari url / link
         for s in soup.find_all("script"):
-            if s.string:
-                m = re.search(r'window\.location(?:\.href)?\s*=\s*["\']([^"\']+)', s.string)
-                if m:
-                    return m.group(1)
-                m2 = re.search(r'(https?://[^\s"\']+\.(?:html|php|mp4|zip|apk))', s.string)
-                if m2:
-                    return m2.group(1)
+            if not s.string:
+                continue
+            txt = s.string
 
-        return "GAK KETEMU ANJING, LINKNYA OBFUSCATED! 🖕"
+            # Pattern: window.location = "https://..."
+            m = re.search(r'window\.location(?:\.href)?\s*=\s*["\']([^"\']+)["\']', txt)
+            if m: return m.group(1)
+
+            # Pattern: var url = "https://..."
+            m = re.search(r'(?:var|let|const)\s+(?:url|link|target|redirect)\s*=\s*["\']([^"\']+)["\']', txt)
+            if m: return m.group(1)
+
+            # Pattern: .replace("...","...") base64 decode
+            m = re.search(r'atob\(["\']([^"\']+)["\']\)', txt)
+            if m:
+                try:
+                    decoded = base64.b64decode(m.group(1)).decode("utf-8", "ignore")
+                    m2 = re.search(r'(https?://[^\s"\']+)', decoded)
+                    if m2: return m2.group(1)
+                except: pass
+
+            # Pattern: cari URL mentah di script
+            m = re.search(r'(https?://[^\s"\']+\.(?:html|php|apk|zip|mp4|pdf|rar))', txt)
+            if m: return m.group(1)
+
+        # 3. Cek hidden input / data attribute
+        for el in soup.find_all(attrs={"data-url": True}):
+            return el["data-url"]
+        for el in soup.find_all(attrs={"data-href": True}):
+            return el["data-href"]
+
+        # 4. Cek iframe
+        iframe = soup.find("iframe", src=True)
+        if iframe and iframe["src"].startswith("http"):
+            return iframe["src"]
+
+        return "LINK TIDAK DITEMUKAN — coba provider lain atau cek manual."
     except Exception as e:
-        return f"ERROR KONTOL: {str(e)}"
-
-@app.route("/api/bypass", methods=["GET"])
-def bypass():
-    target = request.args.get("url")
-    if not target:
-        return jsonify({"error": "MANA URL NYA KONTOL! 🖕"}), 400
-    return jsonify({"bypass": bypass_safelink(target)})
-
-# Vercel handler
-def handler(request):
-    return app(request.environ, lambda *a: None)
+        return f"ERROR: {str(e)}"
